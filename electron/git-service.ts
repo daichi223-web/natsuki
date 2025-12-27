@@ -8,8 +8,14 @@ export function setupGitHandlers() {
     ipcMain.handle('git-status', async (_event, cwd: string) => {
         try {
             const { stdout } = await execAsync('git status --porcelain', { cwd });
-            const { stdout: branch } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd });
-            return { status: stdout, branch: branch.trim(), success: true };
+            let branch = 'unknown';
+            try {
+                const { stdout: b } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd });
+                branch = b.trim();
+            } catch (e) {
+                branch = 'No Commits';
+            }
+            return { status: stdout, branch, success: true };
         } catch (error) {
             console.error('Git status error', error);
             // Return empty or error state

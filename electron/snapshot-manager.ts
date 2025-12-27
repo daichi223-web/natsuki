@@ -80,16 +80,36 @@ export async function runVerify(cwd: string, completionProfile: string): Promise
         return { success: false, exitCode: -1, stdoutTail: '', stderrTail: '', error: `Profile '${completionProfile}' not allowed/found.` };
     }
 
+    // Check for package.json if running npm
+    if (commandStr.startsWith('npm') && !fs.existsSync(path.join(cwd, 'package.json'))) {
+        return {
+            success: false,
+            exitCode: -1,
+            stdoutTail: '',
+            stderrTail: '',
+            error: `Missing package.json in ${cwd}. Cannot run '${commandStr}'.`
+        };
+    }
+
     console.log(`[Verify] Running ${commandStr} in ${cwd}`);
 
     const [cmd, ...args] = commandStr.split(' ');
     const { exitCode, stdout, stderr } = await runCommand(cmd, args, cwd);
 
+    // Populate error if failed
+    const stderrTail = stderr.slice(-2000);
+    const stdoutTail = stdout.slice(-2000);
+    let errorMsg = undefined;
+    if (exitCode !== 0) {
+        errorMsg = stderrTail.trim() || stdoutTail.trim() || `Process exited with code ${exitCode}`;
+    }
+
     return {
         success: exitCode === 0,
         exitCode,
-        stdoutTail: stdout.slice(-2000),
-        stderrTail: stderr.slice(-2000)
+        stdoutTail,
+        stderrTail,
+        error: errorMsg
     };
 }
 
@@ -102,11 +122,29 @@ export async function createSnapshot(cwd: string, jobId: string, intent: string 
         const snapshotDir = path.join(SNAPSHOT_BASE_DIR, jobId, snapshotId);
         await ensureDir(snapshotDir);
 
-        // 1. Git Status
-        const { stdout: gitStatus } = await runCommand('git', ['status', '--porcelain'], cwd);
+        // 1. Git Status (Safeguard: check if git repo exists)
+        // 1. Git Status & Initialization
+        const gitDir = path.join(cwd, '.git');
+        if (!fs.existsSync(gitDir)) {
+            console.log('[Snapshot] Initializing git repository...');
+            try {
+                await runCommand('git', ['init'], cwd);
+                await runCommand('git', ['add', '.'], cwd);
+                await runCommand('git', ['commit', '-m', '"Initial state"'], cwd);
+            } catch (e) {
+                console.warn('[Snapshot] Auto-init failed:', e);
+            }
+        }
 
-        // 2. Git Diff
-        const { stdout: gitDiff } = await runCommand('git', ['diff'], cwd);
+        let gitStatus = "";
+        let gitDiff = "";
+
+        // Now run status
+        const s = await runCommand('git', ['status', '--porcelain'], cwd);
+        gitStatus = s.stdout || s.stderr; // Capture error if any as status
+
+        const d = await runCommand('git', ['diff'], cwd);
+        gitDiff = d.stdout;
 
         // 3. Terminal Tail
         const terminalLines = getRecentLogs();

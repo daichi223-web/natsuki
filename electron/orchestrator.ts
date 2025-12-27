@@ -1,7 +1,7 @@
 import { BrowserWindow, ipcMain } from 'electron';
 import { runVerify, createSnapshot } from './snapshot-manager';
 import { runReview } from './llm-service';
-import { sendToPty, setIdleCallback } from './pty-manager';
+import { sendToPty, setIdleCallback, builder, ptyManager } from './pty-manager';
 import { ReviewResult } from './llm-service';
 import { keyManager } from './key-manager';
 import { jobManager, Job, JobStatus } from './job-manager';
@@ -36,6 +36,35 @@ export class Orchestrator {
     constructor(win: BrowserWindow) {
         this.mainWindow = win;
         this.setupIPC();
+        this.setupPTYListeners();
+    }
+
+    private setupPTYListeners() {
+        // Listen to global builder events from pty-manager
+        builder.on('exit', (info: { exitCode: number, signal?: number }) => {
+            console.log(`[Orchestrator] PTY exited: ${info.exitCode}`);
+            this.handlePTYExit(info);
+        });
+    }
+
+    private handlePTYExit(info: { exitCode: number, signal?: number }) {
+        // Check all active runtimes
+        activeRuntimes.forEach((runtime, jobId) => {
+            const job = jobManager.getJob(jobId);
+            if (job && (job.status === 'running' || job.status === 'fixing')) {
+                console.warn(`[Orchestrator] Job ${jobId} was ${job.status} but PTY exited.`);
+                if (info.exitCode !== 0) {
+                    this.updateJobStatus(jobId, 'failed', { description: `Process exited with code ${info.exitCode}` });
+                } else {
+                    // Start next phase if it exited cleanly? 
+                    // Usually 'running' expects meaningful work. If it exits 0 immediately, maybe it's done?
+                    // For now, let's treat unexpected exit as idle/paused or failed if code != 0.
+                    // If we assume claudecode runs interactively, exit 0 means user quit?
+                    this.updateJobStatus(jobId, 'failed', { description: `Process exited (Code ${info.exitCode})` });
+                }
+            }
+        });
+        activeRuntimes.clear();
     }
 
     private setupIPC() {
@@ -72,27 +101,54 @@ export class Orchestrator {
         const provider = 'anthropic';
         const hasKey = !!keyManager.getApiKey(provider) || !!keyManager.getApiKey('gemini') || !!keyManager.getApiKey('openai');
 
-        // Initialize runtime state if needed
         activeRuntimes.set(jobId, { jobId });
+        this.updateJobStatus(jobId, 'running', { autoFixCount: 0, workspace: cwd });
 
-        // Update Job Data (reset count)
-        this.updateJobStatus(jobId, 'running', { autoFixCount: 0 });
+        if (hasKey) console.log(`[Orchestrator] Autonomous mode enabled for Job ${jobId}`);
+        else console.log(`[Orchestrator] Manual mode (No Reviewer Key found)`);
 
-        if (hasKey) {
-            console.log(`[Orchestrator] Autonomous mode enabled for Job ${jobId}`);
-        } else {
-            console.log(`[Orchestrator] Manual mode (No Reviewer Key found)`);
+        // ★ CRITICAL: Explicitly Spawn Claude
+        // We need the active session ID. For now, we assume single active workspace logic.
+        const sessionId = ptyManager.activeSessionId;
+        if (!sessionId) {
+            console.error('[Orchestrator] No active PTY session found.');
+            // Should we try to create one? Or fail? Fail is safer.
+            this.updateJobStatus(jobId, 'failed', { description: 'No active PTY session. Please open a workspace.' });
+            return { success: false, error: 'No PTY session' };
         }
 
-        // Register idle callback for auto-advance
+        console.log(`[Orchestrator] Spawning Claude for Job ${jobId} in session ${sessionId}`);
+        ptyManager.spawnClaude(sessionId);
+
+        // Wait a bit for Claude to initialize
+        await new Promise(r => setTimeout(r, 2000));
+
+        // Send the job description as the first prompt
+        const prompt = this.buildInitialPrompt(job);
+        console.log(`[Orchestrator] Sending initial prompt to Claude: ${prompt.slice(0, 100)}...`);
+        sendToPty(prompt + '\r');
+
+        // Register idle callback for auto-advance (triggers after Claude finishes)
         setIdleCallback(() => {
             console.log(`[Orchestrator] PTY idle detected, advancing loop for ${jobId}`);
             this.advanceLoop(jobId);
         });
 
-        console.log(`[Orchestrator] Job ${jobId} started.`);
-
+        console.log(`[Orchestrator] Job ${jobId} started with prompt.`);
         return { success: true };
+    }
+
+    private buildInitialPrompt(job: Job): string {
+        // Build a clear prompt for Claude Code
+        let prompt = job.description;
+
+        // If it's a Fix job, the description already contains the structured feedback
+        if (!job.description.startsWith('[Fix]')) {
+            // For regular jobs, add some context
+            prompt = `Task: ${job.description}\n\nPlease implement this task. When done, I will verify and review your changes.`;
+        }
+
+        return prompt;
     }
 
     // This method drives the Autonomous Loop

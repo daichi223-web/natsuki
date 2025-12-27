@@ -107,7 +107,6 @@ class PtyManager {
         }
 
         // 2. Data Handler
-        let autoStartSent = false;
         ptyProcess.onData((data: string) => {
             session.metrics.bytesReceived += data.length;
             session.metrics.lastOutputTime = Date.now();
@@ -124,20 +123,6 @@ class PtyManager {
 
             // Reset idle timer for Orchestrator
             resetIdleTimer();
-
-            // 3. Auto-start Claude logic
-            if (!autoStartSent) {
-                autoStartSent = true;
-                setTimeout(() => {
-                    // Check if session still active
-                    if (this.sessions.has(id)) {
-                        const cmd = this.claudePath || 'claude';
-                        const runCmd = os.platform() === 'win32' ? `& "${cmd}"` : cmd;
-                        console.log(`[PtyManager] Auto-starting Claude in session ${id}: ${runCmd}`);
-                        ptyProcess.write(`${runCmd}\r`);
-                    }
-                }, 1000); // 1s delay for shell readiness
-            }
         });
 
         ptyProcess.onExit(({ exitCode, signal }) => {
@@ -178,12 +163,72 @@ class PtyManager {
         }
     }
 
+    // Explicitly spawn Claude in a session
+    spawnClaude(id: string) {
+        const session = this.sessions.get(id);
+        if (session) {
+            const cmd = this.claudePath || 'claude';
+            // Use call operator for PowerShell safety on Windows
+            const runCmd = os.platform() === 'win32' ? `& "${cmd}"` : cmd;
+            console.log(`[PtyManager] Spawning Claude in session ${id}: ${runCmd}`);
+            session.pty.write(`${runCmd}\r`);
+        } else {
+            console.warn(`[PtyManager] spawnClaude failed: Session ${id} not found`);
+        }
+    }
+
     // For diagnostics (getting logs of a specific or latest session)
     getLogs(id?: string): string[] {
         if (id) return this.sessions.get(id)?.logs || [];
-        // Fallback: get logs of first active session
-        const first = this.sessions.values().next().value;
-        return first?.logs || [];
+        const session = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
+        return session?.logs || [];
+    }
+
+    getDiagnostics(id?: string) {
+        const targetId = id || this.activeSessionId;
+        const session = targetId ? this.sessions.get(targetId) : null;
+
+        if (!session) {
+            return {
+                process: {
+                    pid: 0,
+                    isAlive: false,
+                    exitCode: null,
+                    signal: null,
+                    spawnCommand: '',
+                    spawnCwd: '',
+                    spawnTime: 0,
+                    uptimeMs: 0
+                },
+                pty: {
+                    bytesReceived: 0,
+                    lastOutputTime: 0,
+                    timeSinceLastOutput: null,
+                    recentLogs: []
+                },
+                timestamp: Date.now()
+            };
+        }
+
+        return {
+            process: {
+                pid: session.metrics.pid,
+                isAlive: true,
+                exitCode: null,
+                signal: null,
+                spawnCommand: 'powershell.exe', // Simplified for display
+                spawnCwd: session.cwd,
+                spawnTime: session.metrics.spawnTime,
+                uptimeMs: Date.now() - session.metrics.spawnTime
+            },
+            pty: {
+                bytesReceived: session.metrics.bytesReceived,
+                lastOutputTime: session.metrics.lastOutputTime,
+                timeSinceLastOutput: session.metrics.lastOutputTime > 0 ? Date.now() - session.metrics.lastOutputTime : null,
+                recentLogs: [...session.logs]
+            },
+            timestamp: Date.now()
+        };
     }
 }
 
@@ -217,6 +262,17 @@ export function setupPty(win: BrowserWindow) {
 
     ipcMain.on('terminal-kill', (_event: IpcMainEvent, sessionId: string) => {
         ptyManager.kill(sessionId);
+    });
+
+    ipcMain.handle('get-diagnostics', () => {
+        return ptyManager.getDiagnostics();
+    });
+
+    ipcMain.handle('restart-pty', () => {
+        if (ptyManager.activeSessionId) {
+            ptyManager.kill(ptyManager.activeSessionId);
+        }
+        return { success: true };
     });
 }
 

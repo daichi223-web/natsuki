@@ -1,7 +1,11 @@
 {
   "name": "natsuki",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Autonomous Agentic Coding Assistant",
+  "author": "Natsuki Team",
+  "license": "MIT",
+  "repository": "https://github.com/web/natsuki",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -16,7 +20,6 @@
     "@google/generative-ai": "^0.24.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
-    "electron": "^39.2.7",
     "lucide-react": "^0.562.0",
     "node-pty": "^1.1.0",
     "openai": "^6.15.0",
@@ -37,6 +40,7 @@
     "@vitejs/plugin-react": "^5.1.1",
     "autoprefixer": "^10.4.23",
     "concurrently": "^9.2.1",
+    "electron": "^39.2.7",
     "electron-builder": "^26.0.12",
     "electron-rebuild": "^3.2.9",
     "eslint": "^9.39.1",
