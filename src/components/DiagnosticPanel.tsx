@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Activity, RefreshCw, AlertTriangle, Terminal, Cpu, Network, CheckCircle, XCircle } from 'lucide-react';
+import { Activity, AlertTriangle, Terminal, Cpu, Network, CheckCircle, XCircle } from 'lucide-react';
 import clsx from 'clsx';
 import { formatDistanceToNow } from 'date-fns';
 

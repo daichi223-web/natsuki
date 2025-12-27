@@ -6,6 +6,7 @@ import * as os from 'os';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { OpenAI } from 'openai';
 import { keyManager } from './key-manager';
+import { loadContract } from './snapshot-manager';
 
 // --- Types ---
 
@@ -341,12 +342,16 @@ async function loadSnapshot(jobId: string, snapshotId: string): Promise<Snapshot
         throw new Error("Snapshot files not found: " + snapshotDir);
     }
 
+    // Load contract if available
+    const contract = await loadContract(jobId);
+
     return {
         jobId,
         snapshotId,
         manifest: JSON.parse(manifestStr),
         diff: diffContent,
-        logs: logContent
+        logs: logContent,
+        contract: contract ? { id: contract.id, levels: contract.levels } : undefined
     };
 }
 

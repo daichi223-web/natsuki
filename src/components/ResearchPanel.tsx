@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Play, FileText, CheckSquare, Search, ArrowRight, ShieldCheck } from 'lucide-react';
+import { useState } from 'react';
+import { CheckSquare, Search, ArrowRight, ShieldCheck } from 'lucide-react';
 
 // --- Types (Mirroring Backend) ---
 interface Premises {
@@ -26,7 +26,11 @@ interface Contract {
     requirements: Record<string, string>;
 }
 
-export function ResearchPanel() {
+interface ResearchPanelProps {
+    selectedJobId: string | null;
+}
+
+export function ResearchPanel({ selectedJobId }: ResearchPanelProps) {
     // State machine: 'intake' -> 'premises' -> 'plan' -> 'outcome'
     const [step, setStep] = useState<'intake' | 'premises' | 'plan' | 'outcome'>('intake');
     const [loading, setLoading] = useState(false);
@@ -35,7 +39,7 @@ export function ResearchPanel() {
     const [intent, setIntent] = useState('');
     const [premises, setPremises] = useState<Premises | null>(null);
     const [plan, setPlan] = useState<ResearchPlan | null>(null);
-    const [evidence, setEvidence] = useState<string[]>([]);
+    const [, setEvidence] = useState<string[]>([]);
     const [contract, setContract] = useState<{ json: Contract, markdown: string } | null>(null);
 
     // --- Actions ---
@@ -90,11 +94,26 @@ export function ResearchPanel() {
 
     const handleSendToBuilder = async () => {
         if (!contract) return;
-        // TODO: This needs to create a job. 
-        // For v0.1, we'll just copy to clipboard or alert.
-        // In real integration, we'd call 'orchestrator-start' with contract context.
         await navigator.clipboard.writeText(contract.markdown);
-        alert("Contract Markdown copied to clipboard! (Job creation integration pending)");
+        alert("Contract Markdown copied to clipboard!");
+    };
+
+    const handleSaveToJob = async () => {
+        if (!contract || !selectedJobId) return;
+        try {
+            const res = await window.electronAPI.invoke('contract-save', {
+                jobId: selectedJobId,
+                contract: contract.json
+            });
+            if (res.success) {
+                alert(`Contract saved to Job: ${selectedJobId}`);
+            } else {
+                alert('Failed to save contract: ' + res.error);
+            }
+        } catch (e) {
+            console.error(e);
+            alert('Failed to save contract');
+        }
     };
 
     // --- Render ---
@@ -243,12 +262,25 @@ export function ResearchPanel() {
                         </div>
                     </div>
 
-                    <button
-                        onClick={handleSendToBuilder}
-                        className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded font-bold"
-                    >
-                        Copy Contract to Clipboard
-                    </button>
+                    <div className="flex gap-2">
+                        <button
+                            onClick={handleSendToBuilder}
+                            className="flex-1 bg-gray-600 hover:bg-gray-500 text-white px-4 py-2 rounded"
+                        >
+                            Copy to Clipboard
+                        </button>
+                        <button
+                            onClick={handleSaveToJob}
+                            disabled={!selectedJobId}
+                            className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded font-bold disabled:opacity-50 disabled:cursor-not-allowed"
+                            title={selectedJobId ? `Save to Job: ${selectedJobId}` : 'Select a Job first'}
+                        >
+                            Save to Job
+                        </button>
+                    </div>
+                    {!selectedJobId && (
+                        <div className="text-xs text-yellow-500">Select a Job in the Jobs panel to save this contract.</div>
+                    )}
                     <button onClick={() => setStep('plan')} className="text-xs text-gray-500 underline">Back</button>
                 </div>
             )}

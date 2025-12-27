@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { X, AlertTriangle, CheckCircle, XCircle, ChevronDown, ChevronRight, Shield, Zap, Wrench, RotateCcw, Play } from 'lucide-react';
 
 // Types matching llm-service.ts
@@ -52,7 +52,7 @@ const DecisionBadge = ({ decision }: { decision: Decision }) => {
         APPROVE: 'bg-green-900/50 text-green-300 border-green-700',
         EXCELLENT: 'bg-purple-900/50 text-purple-300 border-purple-700'
     };
-    const icons: Record<Decision, JSX.Element> = {
+    const icons: Record<Decision, ReactNode> = {
         BLOCK: <XCircle size={14} />,
         IMPROVE: <AlertTriangle size={14} />,
         APPROVE: <CheckCircle size={14} />,

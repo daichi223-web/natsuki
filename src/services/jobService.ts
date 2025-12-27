@@ -33,7 +33,7 @@ class JobServiceClass {
     private outputBuffer: string = '';
     private listeners: Set<JobUpdateCallback> = new Set();
     private lastActivityTime: number = 0;
-    private idleCheckTimer: NodeJS.Timeout | null = null;
+    private idleCheckTimer: any = null;
 
     // How long to wait after last output to consider job complete
     private readonly IDLE_THRESHOLD_MS = 3000;

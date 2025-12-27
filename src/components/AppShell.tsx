@@ -111,10 +111,16 @@ export function AppShell() {
         if (!selectedJobId || !lastSnapshotId) return;
         if (isReviewing) return;
 
-        const apiKey = localStorage.getItem('anthropic_api_key');
-        if (!apiKey) {
-            alert('Please set your Anthropic API key in Settings first.');
-            return;
+        // Check if backend has key
+        const hasKey = await window.electronAPI.invoke('key-has', 'anthropic') || await window.electronAPI.invoke('key-has', 'gemini') || await window.electronAPI.invoke('key-has', 'openai');
+
+        if (!hasKey) {
+            // Fallback to local storage or alert
+            const localKey = localStorage.getItem('anthropic_api_key');
+            if (!localKey) {
+                alert('No API keys found. Please set a key in Job Panel Settings.');
+                return;
+            }
         }
 
         setIsReviewing(true);
@@ -123,7 +129,7 @@ export function AppShell() {
             const res = await window.electronAPI.invoke('review-run', {
                 jobId: selectedJobId,
                 snapshotId: lastSnapshotId,
-                apiKey
+                apiKey: undefined // Let backend handle it
             });
 
             if (res?.success && res.result) {
@@ -142,6 +148,8 @@ export function AppShell() {
                 // Auto-open panel for important decisions
                 if (decision === 'BLOCK' || decision === 'IMPROVE') {
                     setShowReviewPanel(true);
+                } else if (decision === 'APPROVE' || decision === 'EXCELLENT') {
+                    alert(`Review PASSED (${decision})! ✓\nLevel: ${achievedLevel}\n\n${summary}`);
                 }
             } else {
                 alert('Review failed: ' + (res?.error ?? 'Unknown error'));
@@ -290,7 +298,7 @@ export function AppShell() {
                             />
                         )}
                         {activeView === 'research' && (
-                            <ResearchPanel />
+                            <ResearchPanel selectedJobId={selectedJobId} />
                         )}
                     </div>
                 </div>

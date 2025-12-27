@@ -6,6 +6,29 @@ import { spawn } from 'child_process';
 import { getRecentLogs } from './pty-manager';
 
 const SNAPSHOT_BASE_DIR = path.join(os.homedir(), '.natsuki', 'snapshots');
+const CONTRACT_BASE_DIR = path.join(os.homedir(), '.natsuki', 'contracts');
+
+// Contract types (matches research-service.ts)
+interface ContractLevels {
+    minimum: string[];
+    middle: string[];
+    maximum: string[];
+}
+
+interface Premises {
+    intent: string;
+    domain: 'game' | 'webapp' | 'tool' | 'unknown';
+    product: string;
+    platform: 'desktop' | 'web' | 'mobile';
+    fidelity: 'prototype' | 'mvp' | 'production';
+}
+
+interface Contract {
+    id: string;
+    premises?: Premises;
+    levels: ContractLevels;
+    requirements?: Record<string, string>;
+}
 
 // Profiles for allowlisted verify commands
 const VERIFY_PROFILES: Record<string, string> = {
@@ -130,6 +153,38 @@ export async function createSnapshot(cwd: string, jobId: string, intent: string 
     }
 }
 
+// Contract Management
+export async function saveContract(jobId: string, contract: Contract): Promise<{ success: boolean, error?: string }> {
+    try {
+        const contractDir = path.join(CONTRACT_BASE_DIR, jobId);
+        await ensureDir(contractDir);
+
+        await fs.promises.writeFile(
+            path.join(contractDir, 'contract.json'),
+            JSON.stringify(contract, null, 2)
+        );
+
+        console.log(`[Contract] Saved contract for Job ${jobId}`);
+        return { success: true };
+    } catch (e: any) {
+        return { success: false, error: e.message };
+    }
+}
+
+export async function loadContract(jobId: string): Promise<Contract | null> {
+    try {
+        const contractPath = path.join(CONTRACT_BASE_DIR, jobId, 'contract.json');
+        if (!fs.existsSync(contractPath)) {
+            return null;
+        }
+        const content = await fs.promises.readFile(contractPath, 'utf-8');
+        return JSON.parse(content);
+    } catch (e) {
+        console.warn(`[Contract] Failed to load contract for ${jobId}:`, e);
+        return null;
+    }
+}
+
 export function setupSnapshotHandlers(win: BrowserWindow) {
     // T4: VerifyRunner
     ipcMain.handle('verify-run', async (_event, { cwd, jobId, profile }: { cwd: string, jobId: string, profile: string }) => {
@@ -139,5 +194,14 @@ export function setupSnapshotHandlers(win: BrowserWindow) {
     // T5: SnapshotOrchestrator
     ipcMain.handle('snapshot-create', async (_event, { cwd, jobId, includeVerify }: { cwd: string, jobId: string, includeVerify?: boolean }) => {
         return await createSnapshot(cwd, jobId);
+    });
+
+    // Contract Management
+    ipcMain.handle('contract-save', async (_event, { jobId, contract }: { jobId: string, contract: Contract }) => {
+        return await saveContract(jobId, contract);
+    });
+
+    ipcMain.handle('contract-load', async (_event, { jobId }: { jobId: string }) => {
+        return await loadContract(jobId);
     });
 }
