@@ -84,19 +84,26 @@ export function JobPanel({ cwd, selectedJobId, onSelectJob }: Props) {
         }
     };
 
-    const handleCreateJob = () => {
+    const handleCreateJob = async () => {
         if (!input.trim()) return;
 
-        const newJob: Job = {
-            id: Date.now().toString(),
-            description: input,
-            status: 'idle',
-            createdAt: Date.now()
-        };
+        try {
+            // Call backend to create job (persisted + IPC notified)
+            const newJob = await window.electronAPI.invoke('job-create', {
+                description: input,
+                cwd: cwd || undefined
+            });
 
-        setJobs([newJob, ...jobs]);
-        setInput('');
-        onSelectJob(newJob.id);
+            if (newJob?.id) {
+                // Backend will notify via 'job-update', but we can optimistically add
+                setJobs(prev => [newJob, ...prev.filter(j => j.id !== newJob.id)]);
+                setInput('');
+                onSelectJob(newJob.id);
+            }
+        } catch (e) {
+            console.error('Failed to create job:', e);
+            alert('Failed to create job');
+        }
     };
 
     const handleRunJob = async (jobId: string) => {

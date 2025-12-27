@@ -59,6 +59,10 @@ app.on('activate', () => {
 app.whenReady().then(() => {
     createWindow()
     setupGitHandlers()
+
+    // Ensure JobManager IPC handlers are registered
+    console.log(`[Main] JobManager initialized with ${jobManager ? 'success' : 'failure'}`);
+
     if (win) {
         setupPty(win)
         setupSnapshotHandlers(win)
