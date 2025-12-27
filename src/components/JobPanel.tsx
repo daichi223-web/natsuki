@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Play, Check, AlertCircle, Clock, Settings, Key, Trash2, X, Wrench } from 'lucide-react';
+import { Play, Check, AlertCircle, Clock, Settings, Key, Trash2, X, Wrench, Bot, Search, Camera, MessageSquare, Loader2, PauseCircle } from 'lucide-react';
 import type { Job } from '../types';
 
 type Props = {
@@ -250,19 +250,30 @@ export function JobPanel({ cwd, selectedJobId, onSelectJob }: Props) {
                             title={isFixJob ? "Fix Job (auto-generated from Review)" : "Click to select this job"}
                         >
                             <div className="flex justify-between items-start mb-1 gap-2">
-                                <span className="font-medium text-gray-200 leading-snug break-words flex items-start gap-1">
+                                <span className="font-medium text-gray-200 leading-snug break-words flex items-start gap-1 text-[13px]">
                                     {isFixJob && <Wrench size={14} className="text-orange-400 shrink-0 mt-0.5" />}
-                                    <span>{isFixJob ? job.description.replace('[Fix] ', '') : job.description}</span>
+                                    <span className="line-clamp-2">{isFixJob ? job.description.replace('[Fix] ', '').split('\n')[0] : job.description}</span>
                                 </span>
-                                <StatusBadge status={job.status} />
+                                <StatusBadge status={job.status} autoFixCount={job.autoFixCount} />
                             </div>
 
+                            {/* Progress bar for active jobs */}
+                            <JobProgress status={job.status} />
+
+                            {/* Error description for failed jobs */}
+                            {job.status === 'failed' && job.description && (
+                                <div className="text-[10px] text-red-400/80 mt-1 line-clamp-1">
+                                    {job.logSummary || 'Job failed'}
+                                </div>
+                            )}
+
                             <div className="flex justify-between items-center mt-2">
-                                <span className="text-xs text-gray-500">
+                                <span className="text-[10px] text-gray-500">
                                     {new Date(job.createdAt).toLocaleTimeString()}
+                                    {job.autoFixCount ? ` • Fix #${job.autoFixCount}` : ''}
                                 </span>
 
-                                {job.status !== 'running' && job.status !== 'verifying' && job.status !== 'reviewing' && (
+                                {!['running', 'fixing', 'verifying', 'snapshotting', 'reviewing'].includes(job.status) && (
                                     <button
                                         onClick={(e) => {
                                             e.stopPropagation();
@@ -270,7 +281,7 @@ export function JobPanel({ cwd, selectedJobId, onSelectJob }: Props) {
                                         }}
                                         className="flex items-center gap-1 text-xs bg-[#333] hover:bg-[#444] px-2 py-0.5 rounded-sm"
                                     >
-                                        <Play size={10} /> Run
+                                        <Play size={10} /> {job.status === 'failed' ? 'Retry' : 'Run'}
                                     </button>
                                 )}
                             </div>
@@ -282,62 +293,122 @@ export function JobPanel({ cwd, selectedJobId, onSelectJob }: Props) {
     );
 }
 
-function StatusBadge({ status }: { status: Job['status'] }) {
-    switch (status) {
-        case 'idle':
-            return (
-                <span className="text-gray-500 text-xs flex items-center gap-1 shrink-0">
-                    <Clock size={10} /> Idle
-                </span>
-            );
-        case 'running':
-            return (
-                <span className="text-blue-400 text-xs flex items-center gap-1 shrink-0">
-                    <Clock size={10} className="animate-spin" /> Running
-                </span>
-            );
-        case 'verifying':
-            return (
-                <span className="text-yellow-400 text-xs flex items-center gap-1 shrink-0">
-                    <Clock size={10} className="animate-spin" /> Verifying
-                </span>
-            );
-        case 'snapshotting':
-            return (
-                <span className="text-purple-400 text-xs flex items-center gap-1 shrink-0">
-                    <Clock size={10} className="animate-spin" /> Snap
-                </span>
-            );
-        case 'reviewing':
-            return (
-                <span className="text-indigo-400 text-xs flex items-center gap-1 shrink-0">
-                    <Clock size={10} className="animate-spin" /> Review
-                </span>
-            );
-        case 'fixing':
-            return (
-                <span className="text-orange-400 text-xs flex items-center gap-1 shrink-0">
-                    <Clock size={10} className="animate-spin" /> Fixing
-                </span>
-            );
-        case 'waiting_approval':
-            return (
-                <span className="text-pink-400 text-xs flex items-center gap-1 shrink-0">
-                    <AlertCircle size={10} /> Wait
-                </span>
-            );
-        case 'completed':
-            return (
-                <span className="text-green-500 text-xs flex items-center gap-1 shrink-0">
-                    <Check size={10} /> Done
-                </span>
-            );
-        case 'failed':
-            return (
-                <span className="text-red-500 text-xs flex items-center gap-1 shrink-0">
-                    <AlertCircle size={10} /> Failed
-                </span>
-            );
-    }
+// Phase order for progress display
+const PHASE_ORDER = ['idle', 'running', 'fixing', 'verifying', 'snapshotting', 'reviewing', 'waiting_approval', 'completed'] as const;
+
+function StatusBadge({ status, autoFixCount }: { status: Job['status']; autoFixCount?: number }) {
+    const config: Record<Job['status'], { icon: React.ReactNode; label: string; color: string; bgColor: string; animate?: boolean }> = {
+        idle: {
+            icon: <Clock size={10} />,
+            label: 'Idle',
+            color: 'text-gray-400',
+            bgColor: 'bg-gray-800'
+        },
+        running: {
+            icon: <Bot size={10} />,
+            label: 'Claude Working',
+            color: 'text-blue-400',
+            bgColor: 'bg-blue-900/40',
+            animate: true
+        },
+        fixing: {
+            icon: <Wrench size={10} />,
+            label: autoFixCount ? `Fix #${autoFixCount}` : 'Fixing',
+            color: 'text-orange-400',
+            bgColor: 'bg-orange-900/40',
+            animate: true
+        },
+        verifying: {
+            icon: <Search size={10} />,
+            label: 'Verifying',
+            color: 'text-yellow-400',
+            bgColor: 'bg-yellow-900/40',
+            animate: true
+        },
+        snapshotting: {
+            icon: <Camera size={10} />,
+            label: 'Snapshot',
+            color: 'text-purple-400',
+            bgColor: 'bg-purple-900/40',
+            animate: true
+        },
+        reviewing: {
+            icon: <MessageSquare size={10} />,
+            label: 'AI Review',
+            color: 'text-indigo-400',
+            bgColor: 'bg-indigo-900/40',
+            animate: true
+        },
+        waiting_approval: {
+            icon: <PauseCircle size={10} />,
+            label: 'Waiting',
+            color: 'text-pink-400',
+            bgColor: 'bg-pink-900/40'
+        },
+        completed: {
+            icon: <Check size={10} />,
+            label: 'Done',
+            color: 'text-green-400',
+            bgColor: 'bg-green-900/40'
+        },
+        failed: {
+            icon: <AlertCircle size={10} />,
+            label: 'Failed',
+            color: 'text-red-400',
+            bgColor: 'bg-red-900/40'
+        }
+    };
+
+    const cfg = config[status];
+
+    return (
+        <span className={`${cfg.color} ${cfg.bgColor} text-[10px] font-medium px-1.5 py-0.5 rounded flex items-center gap-1 shrink-0`}>
+            {cfg.animate ? <Loader2 size={10} className="animate-spin" /> : cfg.icon}
+            {cfg.label}
+        </span>
+    );
+}
+
+// Progress bar showing job phases
+function JobProgress({ status }: { status: Job['status'] }) {
+    const phases = [
+        { key: 'running', label: 'Claude', short: 'C' },
+        { key: 'verifying', label: 'Verify', short: 'V' },
+        { key: 'snapshotting', label: 'Snap', short: 'S' },
+        { key: 'reviewing', label: 'Review', short: 'R' }
+    ];
+
+    // Map fixing to running position
+    const activeStatus = status === 'fixing' ? 'running' : status;
+    const activeIndex = phases.findIndex(p => p.key === activeStatus);
+    const isActive = ['running', 'fixing', 'verifying', 'snapshotting', 'reviewing'].includes(status);
+
+    if (!isActive && status !== 'waiting_approval' && status !== 'completed') return null;
+
+    return (
+        <div className="flex items-center gap-0.5 mt-1.5">
+            {phases.map((phase, idx) => {
+                const isCompleted = status === 'completed' || status === 'waiting_approval'
+                    ? true
+                    : idx < activeIndex;
+                const isCurrent = idx === activeIndex && isActive;
+
+                return (
+                    <div key={phase.key} className="flex items-center">
+                        <div
+                            className={[
+                                'w-4 h-1 rounded-sm transition-colors',
+                                isCompleted ? 'bg-green-600' : '',
+                                isCurrent ? 'bg-blue-500 animate-pulse' : '',
+                                !isCompleted && !isCurrent ? 'bg-gray-700' : ''
+                            ].filter(Boolean).join(' ')}
+                            title={phase.label}
+                        />
+                        {idx < phases.length - 1 && <div className="w-0.5" />}
+                    </div>
+                );
+            })}
+        </div>
+    );
 }
 

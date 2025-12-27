@@ -46,7 +46,9 @@ export interface Job {
     description: string;
     status: 'idle' | 'running' | 'verifying' | 'snapshotting' | 'reviewing' | 'completed' | 'failed' | 'waiting_approval' | 'fixing';
     createdAt: number;
+    workspace?: string;
     logSummary?: string;
+    autoFixCount?: number;
     // Phase 3 extensions
     latestSnapshotId?: string;
     reviewResult?: ReviewResult;
