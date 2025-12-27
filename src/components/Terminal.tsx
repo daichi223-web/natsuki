@@ -12,6 +12,7 @@ interface TerminalProps {
 export function TerminalComponent({ cwd }: TerminalProps) {
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
+    const sessionRef = useRef<string | null>(null);
 
     useEffect(() => {
         if (!terminalRef.current) return;
@@ -31,34 +32,39 @@ export function TerminalComponent({ cwd }: TerminalProps) {
         term.loadAddon(fitAddon);
         term.loadAddon(webLinksAddon);
 
-        // Helper to safely fit
         const safelyFit = () => {
-            if (!terminalRef.current) return;
-            if (terminalRef.current.clientWidth === 0 || terminalRef.current.clientHeight === 0) return;
-
-            try {
-                fitAddon.fit();
-            } catch (e) {
-                console.warn("xterm fit error suppressed:", e);
-            }
+            if (!terminalRef.current || !terminalRef.current.clientWidth) return;
+            try { fitAddon.fit(); } catch (e) { }
         };
 
         term.open(terminalRef.current);
         xtermRef.current = term;
 
-        // Delay fit() to ensure DOM is ready
-        setTimeout(() => {
-            safelyFit();
-        }, 100);
+        // Init Session
+        let isActive = true;
+        (async () => {
+            try {
+                const res = await window.electronAPI.invoke('terminal-init', cwd);
+                if (isActive && res?.sessionId) {
+                    sessionRef.current = res.sessionId;
+                    console.log(`[Terminal] Attached to session ${res.sessionId}`);
 
-        // Send init
-        window.electronAPI.send('terminal-init', cwd);
+                    // Initial Resize
+                    safelyFit();
+                    if (term.cols && term.rows) {
+                        window.electronAPI.send('terminal-resize', { sessionId: res.sessionId, cols: term.cols, rows: term.rows });
+                    }
+                }
+            } catch (e) {
+                term.write(`\r\nConnection failed: ${e}\r\n`);
+            }
+        })();
 
-        // Resize observer
+        // Resize Observer
         const resizeObserver = new ResizeObserver(() => {
             safelyFit();
-            if (term.cols && term.rows) {
-                window.electronAPI.send('terminal-resize', { cols: term.cols, rows: term.rows });
+            if (term.cols && term.rows && sessionRef.current) {
+                window.electronAPI.send('terminal-resize', { sessionId: sessionRef.current, cols: term.cols, rows: term.rows });
             }
         });
         resizeObserver.observe(terminalRef.current);
@@ -78,53 +84,69 @@ export function TerminalComponent({ cwd }: TerminalProps) {
             // Ctrl+V or Ctrl+Shift+V: Paste
             if (event.ctrlKey && event.code === 'KeyV') {
                 navigator.clipboard.readText().then(text => {
-                    window.electronAPI.send('terminal-input', text);
+                    if (sessionRef.current) {
+                        window.electronAPI.send('terminal-input', { sessionId: sessionRef.current, data: text });
+                    }
                 });
                 return false;
             }
             return true;
         });
 
-        // Input
+        // Input Handling
         term.onData(data => {
-            window.electronAPI.send('terminal-input', data);
+            if (sessionRef.current) {
+                window.electronAPI.send('terminal-input', { sessionId: sessionRef.current, data });
+            }
         });
 
-        // Output from Main
-        const handleData = (data: string) => {
-            term.write(data);
-            // Forward to job service for completion detection
-            jobService.onTerminalOutput(data);
-        };
-        const handleExit = ({ exitCode }: { exitCode: number }) => {
-            term.write(`\r\nProgram exited with code ${exitCode}\r\n`);
+        // Incoming Data
+        const handleData = (event: any) => {
+            // event = { sessionId, data }
+            if (event.sessionId === sessionRef.current) {
+                term.write(event.data);
+                jobService.onTerminalOutput(event.data);
+            }
         };
 
-        window.electronAPI.on('terminal-data', handleData);
-        window.electronAPI.on('terminal-exit', handleExit);
+        const handleExit = (event: any) => {
+            if (event.sessionId === sessionRef.current) {
+                term.write(`\r\nProgram exited (Code ${event.exitCode})\r\n`);
+            }
+        };
 
-        // Window resize handler
+        // Use dispose functions instead of removeAllListeners
+        const disposeData = window.electronAPI.on('terminal-data', handleData);
+        const disposeExit = window.electronAPI.on('terminal-exit', handleExit);
+
         const handleWindowResize = () => {
             safelyFit();
-            if (term.cols && term.rows) {
-                window.electronAPI.send('terminal-resize', { cols: term.cols, rows: term.rows });
+            if (term.cols && term.rows && sessionRef.current) {
+                window.electronAPI.send('terminal-resize', { sessionId: sessionRef.current, cols: term.cols, rows: term.rows });
             }
         };
         window.addEventListener('resize', handleWindowResize);
 
-        // Initial focus
+        // Initial Focus
         setTimeout(() => {
             term.focus();
             safelyFit();
         }, 200);
 
         return () => {
+            isActive = false;
+            if (sessionRef.current) {
+                window.electronAPI.send('terminal-kill', sessionRef.current);
+                sessionRef.current = null;
+            }
             resizeObserver.disconnect();
             window.removeEventListener('resize', handleWindowResize);
-            window.electronAPI.removeAllListeners('terminal-data');
+            // Properly dispose listeners
+            disposeData();
+            disposeExit();
             term.dispose();
         };
-    }, []);
+    }, [cwd]);
 
     return (
         <div className="h-full w-full bg-[#1e1e1e] p-1" ref={terminalRef} />

@@ -1,37 +1,21 @@
-import { BrowserWindow, ipcMain } from 'electron'
-import * as pty from 'node-pty'
-import os from 'os'
-import * as fs from 'fs'
+import { BrowserWindow, ipcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron';
+import * as pty from 'node-pty';
+import os from 'os';
+import * as fs from 'fs';
 import { EventEmitter } from 'events';
 import { logEvent } from './log-service';
+import { randomUUID } from 'crypto';
 
-// --- BuilderRunner Interface ---
-export const builder = new EventEmitter();
-
-let ptyProcess: pty.IPty | null = null;
-let ptyMetrics = {
-    pid: 0,
-    spawnTime: 0,
-    bytesReceived: 0,
-    lastOutputTime: 0,
-    cwd: '',
-    command: '',
-    killSignal: null as string | null,
-    exitCode: null as number | null
-};
-
-// Idle detection for autonomous loop
+// Idle detection for Orchestrator
 let idleTimer: NodeJS.Timeout | null = null;
 let idleCallback: (() => void) | null = null;
-const IDLE_THRESHOLD_MS = 5000; // 5 seconds of no output = idle
+const IDLE_THRESHOLD_MS = 5000;
 
 function resetIdleTimer() {
-    if (idleTimer) {
-        clearTimeout(idleTimer);
-    }
+    if (idleTimer) clearTimeout(idleTimer);
     if (idleCallback) {
         idleTimer = setTimeout(() => {
-            console.log('[PTY] Idle detected after', IDLE_THRESHOLD_MS, 'ms');
+            console.log('[PTY] Idle detected');
             if (idleCallback) idleCallback();
         }, IDLE_THRESHOLD_MS);
     }
@@ -45,66 +29,52 @@ export function setIdleCallback(callback: (() => void) | null) {
     }
 }
 
-// "Ring buffer" for recent logs (raw text)
-let recentLogs: string[] = [];
-const MAX_LOG_LINES = 50;
+export const builder = new EventEmitter();
 
-function appendLog(text: string) {
-    const lines = text.split(/\r?\n/);
-    lines.forEach(line => {
-        if (line.trim().length > 0) {
-            recentLogs.push(line);
-        }
-    });
-    if (recentLogs.length > MAX_LOG_LINES) {
-        recentLogs = recentLogs.slice(recentLogs.length - MAX_LOG_LINES);
-    }
+interface Session {
+    pty: pty.IPty;
+    cwd: string;
+    metrics: {
+        pid: number;
+        spawnTime: number;
+        bytesReceived: number;
+        lastOutputTime: number;
+    };
+    logs: string[];
 }
 
-// --- Programmatic Control ---
+class PtyManager {
+    private sessions = new Map<string, Session>();
+    private claudePath: string | null = null;
+    public activeSessionId: string | null = null;
 
-export function startSession(cwd: string) {
-    if (ptyProcess) {
-        try {
-            ptyProcess.kill();
-        } catch (e) { console.error('Failed to kill pty', e); }
-        ptyProcess = null;
+    constructor() {
+        this.resolveClaudePath();
     }
 
-    const shell = os.platform() === 'win32' ? 'cmd.exe' : 'bash';
-    const targetCwd = cwd || os.homedir();
-
-    // Attempt to find Claude executable
-    const hardcodedPath = 'C:\\Users\\a713678\\AppData\\Roaming\\npm\\claude.cmd';
-    let claudeCommand = 'claude'; // Default to PATH
-
-    if (os.platform() === 'win32') {
-        if (fs.existsSync(hardcodedPath)) {
-            claudeCommand = hardcodedPath;
-        } else {
-            // Try 'claudecode' or 'claude' from PATH
-            claudeCommand = 'claude';
+    private resolveClaudePath() {
+        if (os.platform() !== 'win32') {
+            this.claudePath = 'claude';
+            return;
         }
+
+        const hardcodedPath = 'C:\\Users\\a713678\\AppData\\Roaming\\npm\\claude.cmd';
+        if (fs.existsSync(hardcodedPath)) {
+            this.claudePath = hardcodedPath;
+        } else {
+            this.claudePath = 'claude';
+        }
+        console.log('[PtyManager] Resolved Claude Path:', this.claudePath);
     }
 
-    console.log(`[Builder] Spawning ${shell} in ${targetCwd} (using ${claudeCommand})`);
-    logEvent('pty-spawn', { command: shell, cwd: targetCwd, claude: claudeCommand });
+    create(cwd: string): string {
+        const id = randomUUID();
+        const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
+        const targetCwd = cwd || os.homedir();
 
-    // Reset metrics
-    ptyMetrics = {
-        pid: 0,
-        spawnTime: Date.now(),
-        bytesReceived: 0,
-        lastOutputTime: 0,
-        cwd: targetCwd,
-        command: shell,
-        killSignal: null,
-        exitCode: null
-    };
-    recentLogs = [];
+        console.log(`[PtyManager] Creating session ${id} in ${targetCwd}`);
 
-    try {
-        ptyProcess = pty.spawn(shell, [], {
+        const ptyProcess = pty.spawn(shell, [], {
             name: 'xterm-color',
             cols: 80,
             rows: 30,
@@ -113,150 +83,154 @@ export function startSession(cwd: string) {
             useConpty: true
         });
 
-        console.log('[Builder] PTY spawned, PID:', ptyProcess.pid);
+        // Initialize Session Data
+        const session: Session = {
+            pty: ptyProcess,
+            cwd: targetCwd,
+            metrics: {
+                pid: ptyProcess.pid,
+                spawnTime: Date.now(),
+                bytesReceived: 0,
+                lastOutputTime: 0
+            },
+            logs: []
+        };
+        this.sessions.set(id, session);
+        this.activeSessionId = id; // Track as active
 
-        // Force UTF-8 on Windows
+        // --- Event Handlers ---
+
+        // 1. Initial Setup for Windows
         if (os.platform() === 'win32') {
+            // Force UTF-8 (PowerShell usually handles this well, but chcp 65001 ensures ConPTY matches)
             ptyProcess.write('chcp 65001\r');
         }
 
+        // 2. Data Handler
         let autoStartSent = false;
         ptyProcess.onData((data: string) => {
-            ptyMetrics.bytesReceived += data.length;
-            ptyMetrics.lastOutputTime = Date.now();
-            appendLog(data);
+            session.metrics.bytesReceived += data.length;
+            session.metrics.lastOutputTime = Date.now();
+
+            // Log buffer (keep last 50 lines)
+            const lines = data.split(/\r?\n/);
+            lines.forEach(l => {
+                if (l.trim()) session.logs.push(l);
+            });
+            if (session.logs.length > 50) session.logs = session.logs.slice(-50);
+
+            // Emit safely with ID
+            builder.emit('data', { sessionId: id, data });
+
+            // Reset idle timer for Orchestrator
             resetIdleTimer();
 
-            // Emit for Orchestrator
-            builder.emit('data', data);
-
-            // Auto-start Claude on first prompt/data (buffered)
+            // 3. Auto-start Claude logic
             if (!autoStartSent) {
-                // heuristic: wait a bit after first data or look for prompt ">"
-                // For simplicity/robustness, just delay 1s after first data
                 autoStartSent = true;
                 setTimeout(() => {
-                    if (ptyProcess) {
-                        console.log('[Builder] Auto-starting Claude:', claudeCommand);
-                        ptyProcess.write(`${claudeCommand}\r`);
+                    // Check if session still active
+                    if (this.sessions.has(id)) {
+                        const cmd = this.claudePath || 'claude';
+                        const runCmd = os.platform() === 'win32' ? `& "${cmd}"` : cmd;
+                        console.log(`[PtyManager] Auto-starting Claude in session ${id}: ${runCmd}`);
+                        ptyProcess.write(`${runCmd}\r`);
                     }
-                }, 1000);
+                }, 1000); // 1s delay for shell readiness
             }
         });
 
-        ptyProcess.onExit(({ exitCode, signal }: { exitCode: number, signal?: number }) => {
-            const uptimeMs = Date.now() - ptyMetrics.spawnTime;
-            console.log(`[Builder] PTY exited code=${exitCode} signal=${signal}`);
-            logEvent('pty-exit', { exitCode, signal, uptimeMs });
+        ptyProcess.onExit(({ exitCode, signal }) => {
+            console.log(`[PtyManager] Session ${id} exited (code ${exitCode})`);
+            logEvent('pty-exit', { sessionId: id, exitCode, signal });
 
-            ptyMetrics.exitCode = exitCode;
-            ptyMetrics.killSignal = signal ? String(signal) : null;
-
-            builder.emit('exit', { exitCode, signal });
-            ptyProcess = null;
+            builder.emit('exit', { sessionId: id, exitCode, signal });
+            this.sessions.delete(id);
         });
 
-    } catch (error) {
-        console.error('[Builder] Failed to spawn pty', error);
-        builder.emit('error', error);
+        return id;
+    }
+
+    write(id: string, data: string) {
+        const session = this.sessions.get(id);
+        if (session) {
+            session.pty.write(data);
+        } else {
+            console.warn(`[PtyManager] Write dropped: Session ${id} not found`);
+        }
+    }
+
+    resize(id: string, cols: number, rows: number) {
+        const session = this.sessions.get(id);
+        if (session) {
+            try {
+                session.pty.resize(cols, rows);
+            } catch (e) { console.error('Resize error:', e); }
+        }
+    }
+
+    kill(id: string) {
+        const session = this.sessions.get(id);
+        if (session) {
+            console.log(`[PtyManager] Killing session ${id}`);
+            session.pty.kill();
+            this.sessions.delete(id);
+        }
+    }
+
+    // For diagnostics (getting logs of a specific or latest session)
+    getLogs(id?: string): string[] {
+        if (id) return this.sessions.get(id)?.logs || [];
+        // Fallback: get logs of first active session
+        const first = this.sessions.values().next().value;
+        return first?.logs || [];
     }
 }
 
-export function stopSession() {
-    if (ptyProcess) {
-        ptyProcess.kill();
-        ptyProcess = null;
-    }
-}
+export const ptyManager = new PtyManager();
 
-export function writeToSession(data: string) {
-    if (ptyProcess) {
-        ptyProcess.write(data);
-    }
-}
-
-
+// --- Main Process Glue ---
 export function setupPty(win: BrowserWindow) {
-    // --- Connect Builder Events to Frontend ---
-    builder.on('data', (data) => {
-        if (!win.isDestroyed()) win.webContents.send('terminal-data', data);
+
+    // Relay Events to Renderer (filtered by sessionId logic in Renderer)
+    builder.on('data', (payload: { sessionId: string, data: string }) => {
+        if (!win.isDestroyed()) win.webContents.send('terminal-data', payload);
     });
 
-    builder.on('exit', (info) => {
-        if (!win.isDestroyed()) win.webContents.send('terminal-exit', info);
-    });
-
-    builder.on('error', (err) => {
-        if (!win.isDestroyed()) win.webContents.send('terminal-data', `\r\nError: ${err}\r\n`);
+    builder.on('exit', (payload: { sessionId: string, exitCode: number }) => {
+        if (!win.isDestroyed()) win.webContents.send('terminal-exit', payload);
     });
 
     // --- IPC Handlers ---
 
-    ipcMain.handle('get-diagnostics', () => {
-        return {
-            process: {
-                pid: ptyProcess ? ptyProcess.pid : ptyMetrics.pid,
-                isAlive: !!ptyProcess,
-                exitCode: ptyMetrics.exitCode,
-                signal: ptyMetrics.killSignal,
-                spawnCommand: ptyMetrics.command,
-                spawnCwd: ptyMetrics.cwd,
-                spawnTime: ptyMetrics.spawnTime,
-                uptimeMs: ptyMetrics.spawnTime ? Date.now() - ptyMetrics.spawnTime : 0
-            },
-            pty: {
-                bytesReceived: ptyMetrics.bytesReceived,
-                lastOutputTime: ptyMetrics.lastOutputTime,
-                timeSinceLastOutput: ptyMetrics.lastOutputTime > 0 ? Date.now() - ptyMetrics.lastOutputTime : null,
-                recentLogs: recentLogs
-            },
-            timestamp: Date.now()
-        };
+    ipcMain.handle('terminal-init', (_event: IpcMainInvokeEvent, cwd: string) => {
+        return { sessionId: ptyManager.create(cwd) };
     });
 
-    ipcMain.handle('get-pty-metrics', () => {
-        return {
-            pid: ptyProcess ? ptyProcess.pid : 0,
-            spawnTime: ptyMetrics.spawnTime,
-            bytesReceived: ptyMetrics.bytesReceived,
-            lastOutputTime: ptyMetrics.lastOutputTime,
-            isRunning: !!ptyProcess
-        };
+    ipcMain.on('terminal-input', (_event: IpcMainEvent, { sessionId, data }: { sessionId: string, data: string }) => {
+        ptyManager.write(sessionId, data);
     });
 
-    ipcMain.handle('restart-pty', (_event) => {
-        stopSession();
-        return { success: true };
+    ipcMain.on('terminal-resize', (_event: IpcMainEvent, { sessionId, cols, rows }: { sessionId: string, cols: number, rows: number }) => {
+        ptyManager.resize(sessionId, cols, rows);
     });
 
-
-    ipcMain.on('terminal-init', (_event: any, cwd: string) => {
-        startSession(cwd);
-    });
-
-    ipcMain.on('terminal-input', (_event: any, data: string) => {
-        writeToSession(data);
-    });
-
-    ipcMain.on('terminal-resize', (_event: any, { cols, rows }: { cols: number, rows: number }) => {
-        if (ptyProcess) {
-            try {
-                ptyProcess.resize(cols, rows);
-            } catch (e) { console.error('Resize error', e); }
-        }
-    });
-
-    ipcMain.on('terminal-kill', () => {
-        stopSession();
+    ipcMain.on('terminal-kill', (_event: IpcMainEvent, sessionId: string) => {
+        ptyManager.kill(sessionId);
     });
 }
 
 // Export for Snapshot Engine
 export function getRecentLogs(): string[] {
-    return [...recentLogs];
+    return ptyManager.getLogs();
 }
 
-// Export for Orchestrator compatibility (Deprecated, use writeToSession)
-export function sendToPty(data: string) {
-    writeToSession(data);
+// Helper for Orchestrator
+export function sendToPty(data: string, sessionId?: string) {
+    const target = sessionId || ptyManager.activeSessionId;
+    if (target) {
+        ptyManager.write(target, data);
+    } else {
+        console.warn('[PtyManager] sendToPty failed: No active session');
+    }
 }
