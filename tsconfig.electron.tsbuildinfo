@@ -1,0 +1,1 @@
+{"root":["./electron/git-service.ts","./electron/key-manager.ts","./electron/llm-service.ts","./electron/log-service.ts","./electron/main.ts","./electron/orchestrator.ts","./electron/preload.ts","./electron/pty-manager.ts","./electron/research-service.ts","./electron/snapshot-manager.ts"],"version":"5.9.3"}
