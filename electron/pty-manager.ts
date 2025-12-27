@@ -1,6 +1,7 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import * as pty from 'node-pty'
 import os from 'os'
+import * as fs from 'fs'
 import { EventEmitter } from 'events';
 import { logEvent } from './log-service';
 
@@ -72,10 +73,22 @@ export function startSession(cwd: string) {
 
     const shell = os.platform() === 'win32' ? 'cmd.exe' : 'bash';
     const targetCwd = cwd || os.homedir();
-    const claudeCommand = os.platform() === 'win32' ? 'claude' : 'claude';
 
-    console.log(`[Builder] Spawning ${shell} in ${targetCwd}`);
-    logEvent('pty-spawn', { command: shell, cwd: targetCwd });
+    // Attempt to find Claude executable
+    const hardcodedPath = 'C:\\Users\\a713678\\AppData\\Roaming\\npm\\claude.cmd';
+    let claudeCommand = 'claude'; // Default to PATH
+
+    if (os.platform() === 'win32') {
+        if (fs.existsSync(hardcodedPath)) {
+            claudeCommand = hardcodedPath;
+        } else {
+            // Try 'claudecode' or 'claude' from PATH
+            claudeCommand = 'claude';
+        }
+    }
+
+    console.log(`[Builder] Spawning ${shell} in ${targetCwd} (using ${claudeCommand})`);
+    logEvent('pty-spawn', { command: shell, cwd: targetCwd, claude: claudeCommand });
 
     // Reset metrics
     ptyMetrics = {
@@ -97,20 +110,17 @@ export function startSession(cwd: string) {
             rows: 30,
             cwd: targetCwd,
             env: process.env as any,
-            useConpty: false
+            useConpty: true
         });
 
         console.log('[Builder] PTY spawned, PID:', ptyProcess.pid);
 
-        // Auto-start Claude
-        setTimeout(() => {
-            if (ptyProcess) {
-                ptyProcess.write(`${claudeCommand}\r`);
-            }
-        }, 500);
+        // Force UTF-8 on Windows
+        if (os.platform() === 'win32') {
+            ptyProcess.write('chcp 65001\r');
+        }
 
-        ptyMetrics.pid = ptyProcess.pid;
-
+        let autoStartSent = false;
         ptyProcess.onData((data: string) => {
             ptyMetrics.bytesReceived += data.length;
             ptyMetrics.lastOutputTime = Date.now();
@@ -119,6 +129,19 @@ export function startSession(cwd: string) {
 
             // Emit for Orchestrator
             builder.emit('data', data);
+
+            // Auto-start Claude on first prompt/data (buffered)
+            if (!autoStartSent) {
+                // heuristic: wait a bit after first data or look for prompt ">"
+                // For simplicity/robustness, just delay 1s after first data
+                autoStartSent = true;
+                setTimeout(() => {
+                    if (ptyProcess) {
+                        console.log('[Builder] Auto-starting Claude:', claudeCommand);
+                        ptyProcess.write(`${claudeCommand}\r`);
+                    }
+                }, 1000);
+            }
         });
 
         ptyProcess.onExit(({ exitCode, signal }: { exitCode: number, signal?: number }) => {

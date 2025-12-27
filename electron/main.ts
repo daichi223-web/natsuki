@@ -57,6 +57,12 @@ app.on('activate', () => {
 })
 
 app.whenReady().then(() => {
+    // Register basic handlers FIRST
+    ipcMain.handle('select-folder', async () => {
+        const result = await dialog.showOpenDialog({ properties: ['openDirectory'], title: 'Select Workspace' });
+        return (result.canceled || result.filePaths.length === 0) ? null : result.filePaths[0];
+    });
+
     createWindow()
     setupGitHandlers()
 
@@ -85,15 +91,5 @@ app.whenReady().then(() => {
         });
     }
 
-    // Folder selection dialog
-    ipcMain.handle('select-folder', async () => {
-        const result = await dialog.showOpenDialog({
-            properties: ['openDirectory'],
-            title: 'Select Workspace Folder'
-        })
-        if (result.canceled || result.filePaths.length === 0) {
-            return null
-        }
-        return result.filePaths[0]
-    })
+
 })
