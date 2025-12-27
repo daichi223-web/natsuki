@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Play, Check, AlertCircle, Clock, Settings, Key, Trash2, X } from 'lucide-react';
+import { Play, Check, AlertCircle, Clock, Settings, Key, Trash2, X, Wrench } from 'lucide-react';
 import type { Job } from '../types';
 
 type Props = {
@@ -27,6 +27,9 @@ export function JobPanel({ cwd, selectedJobId, onSelectJob }: Props) {
 
     // Load initial jobs or sync with backend
     useEffect(() => {
+        // Fetch initial list
+        window.electronAPI.invoke('job-list').then(setJobs).catch(console.error);
+
         const removeListener = window.electronAPI.on('job-update', (updatedJob: Job) => {
             setJobs(prev => {
                 const idx = prev.findIndex(j => j.id === updatedJob.id);
@@ -35,7 +38,8 @@ export function JobPanel({ cwd, selectedJobId, onSelectJob }: Props) {
                     newJobs[idx] = { ...newJobs[idx], ...updatedJob };
                     return newJobs;
                 }
-                return prev;
+                // If not found, it's a new job (e.g. created by backend)
+                return [updatedJob, ...prev];
             });
         });
 
@@ -223,20 +227,25 @@ export function JobPanel({ cwd, selectedJobId, onSelectJob }: Props) {
 
                 {jobs.map(job => {
                     const isSelected = selectedJobId === job.id;
+                    const isFixJob = job.description.startsWith('[Fix]');
 
                     return (
                         <div
                             key={job.id}
                             onClick={() => onSelectJob(job.id)}
                             className={[
-                                'bg-[#252526] border p-2 rounded-sm text-sm cursor-pointer',
-                                isSelected ? 'border-blue-500 ring-1 ring-blue-600/30' : 'border-[#333] hover:border-[#444]'
+                                'border p-2 rounded-sm text-sm cursor-pointer',
+                                isFixJob ? 'bg-orange-900/20' : 'bg-[#252526]',
+                                isSelected
+                                    ? (isFixJob ? 'border-orange-500 ring-1 ring-orange-600/30' : 'border-blue-500 ring-1 ring-blue-600/30')
+                                    : 'border-[#333] hover:border-[#444]'
                             ].join(' ')}
-                            title="Click to select this job"
+                            title={isFixJob ? "Fix Job (auto-generated from Review)" : "Click to select this job"}
                         >
                             <div className="flex justify-between items-start mb-1 gap-2">
-                                <span className="font-medium text-gray-200 leading-snug break-words">
-                                    {job.description}
+                                <span className="font-medium text-gray-200 leading-snug break-words flex items-start gap-1">
+                                    {isFixJob && <Wrench size={14} className="text-orange-400 shrink-0 mt-0.5" />}
+                                    <span>{isFixJob ? job.description.replace('[Fix] ', '') : job.description}</span>
                                 </span>
                                 <StatusBadge status={job.status} />
                             </div>

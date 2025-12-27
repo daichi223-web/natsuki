@@ -7,7 +7,8 @@ import { JobPanel } from './JobPanel';
 import { ResearchPanel } from './ResearchPanel';
 import { ReviewPanel } from './ReviewPanel';
 import { Folder, Play, Undo, ShieldAlert, Activity, ListTodo, Camera, ClipboardList, Search } from 'lucide-react';
-import type { ReviewHistoryItem, ReviewIssue } from '../types';
+import type { ReviewHistoryItem, ReviewResult } from '../types';
+import { jobService } from '../services/jobService';
 
 type VerifyProfile = 'lint' | 'build' | 'typecheck' | 'test';
 
@@ -173,12 +174,74 @@ export function AppShell() {
         }
     };
 
-    // Handle fix job creation from ReviewPanel
-    const handleCreateFixJob = (issues: ReviewIssue[]) => {
-        // TODO: Create a new job with the issues as context
-        const issueList = issues.map(i => `- [${i.severity}] ${i.title}`).join('\n');
-        alert(`Fix Job would be created with issues:\n\n${issueList}\n\n(Not implemented yet)`);
-        setShowReviewPanel(false);
+    // Handle fix job creation from ReviewPanel - AUTO START
+    const handleCreateFixJob = async (result: ReviewResult) => {
+        if (!selectedJobId || !cwd) {
+            alert("No active job or workspace selected!");
+            return;
+        }
+
+        try {
+            setStatusMessage('Creating Fix Job...');
+            const fixJob = await jobService.createFixJob(selectedJobId, result);
+
+            if (fixJob?.id) {
+                // 1. Select the new fix job
+                setSelectedJobId(fixJob.id);
+
+                // 2. Switch to Jobs view
+                setActiveView('jobs');
+                setShowReviewPanel(false);
+
+                // 3. Auto-start the fix job via Orchestrator
+                setStatusMessage(`Fix Job created: ${fixJob.id} - Starting...`);
+                const started = await jobService.startJob(fixJob.id, cwd);
+
+                if (started) {
+                    setStatusMessage(`Fix Job running: ${fixJob.id}`);
+
+                    // 4. Send the fix prompt to terminal (Claude will see it)
+                    const fixPrompt = buildFixPrompt(result);
+                    window.electronAPI.send('terminal-input', fixPrompt + '\r');
+                } else {
+                    setStatusMessage(`Fix Job created but failed to start`);
+                }
+            }
+        } catch (e: any) {
+            alert("Failed to create fix job: " + e.message);
+            setStatusMessage('Fix Job creation failed');
+        }
+    };
+
+    // Build the fix prompt for Claude
+    const buildFixPrompt = (result: ReviewResult): string => {
+        let prompt = `# Review Feedback - Fix Required\n\n`;
+        prompt += `**Decision**: ${result.decision}\n`;
+        prompt += `**Achieved Level**: ${result.achievedLevel}\n`;
+        prompt += `**Summary**: ${result.summary}\n\n`;
+
+        if (result.missing.minimum.length > 0) {
+            prompt += `## MUST FIX (Minimum - Blocking)\n`;
+            result.missing.minimum.forEach(m => { prompt += `- ${m}\n`; });
+            prompt += `\n`;
+        }
+
+        if (result.missing.middle.length > 0) {
+            prompt += `## SHOULD FIX (Middle)\n`;
+            result.missing.middle.forEach(m => { prompt += `- ${m}\n`; });
+            prompt += `\n`;
+        }
+
+        if (result.issues.length > 0) {
+            prompt += `## Issues to Address\n`;
+            result.issues.forEach(i => {
+                prompt += `- [${i.severity}] ${i.title}: ${i.suggestion}\n`;
+            });
+            prompt += `\n`;
+        }
+
+        prompt += `Please fix these issues to reach the next level.`;
+        return prompt;
     };
 
     return (

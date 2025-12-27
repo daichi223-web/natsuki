@@ -369,6 +369,29 @@ export async function runReview(jobId: string, snapshotId: string, apiKey?: stri
     try {
         const snapshot = await loadSnapshot(jobId, snapshotId);
 
+        // SAFEGUARD: Max Diff Lines
+        const MAX_DIFF_LINES = 1000;
+        const diffLines = snapshot.diff.split('\n').length;
+        if (diffLines > MAX_DIFF_LINES) {
+            console.warn(`[Review] Diff too large (${diffLines} lines). Blocking auto-review.`);
+            return {
+                success: true,
+                result: {
+                    decision: 'IMPROVE',
+                    achievedLevel: 'none',
+                    summary: `Diff is too large (${diffLines} lines). Please break down changes or review manually.`,
+                    missing: { minimum: [], middle: [], maximum: [] },
+                    issues: [{
+                        severity: 'critical',
+                        title: 'Diff Too Large',
+                        evidence: `Diff has ${diffLines} lines (Max: ${MAX_DIFF_LINES})`,
+                        suggestion: 'Split changes into smaller PRs/Jobs'
+                    }],
+                    risk: { security: 'high', correctness: 'low', maintainability: 'high' }
+                }
+            };
+        }
+
         // Simple strategy for now: Use default provider
         // TODO: Implement Tiered Logic (Gemini Flash -> Anthropic) here if requested
         // For Phase 3.0, we just support switching.

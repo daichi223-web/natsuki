@@ -42,7 +42,7 @@ interface Props {
     reviews: ReviewHistoryItem[];
     onClose: () => void;
     onRevert?: () => void;
-    onFixJob?: (issues: ReviewIssue[]) => void;
+    onFixJob?: (result: ReviewResult) => void;
 }
 
 const DecisionBadge = ({ decision }: { decision: Decision }) => {
@@ -117,10 +117,9 @@ const IssueCard = ({ issue }: { issue: ReviewIssue }) => {
                 onClick={() => setExpanded(!expanded)}
             >
                 {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                <span className={`text-[10px] uppercase font-bold ${
-                    issue.severity === 'critical' ? 'text-red-400' :
+                <span className={`text-[10px] uppercase font-bold ${issue.severity === 'critical' ? 'text-red-400' :
                     issue.severity === 'major' ? 'text-yellow-400' : 'text-blue-400'
-                }`}>{issue.severity}</span>
+                    }`}>{issue.severity}</span>
                 <span className="text-sm text-gray-200">{issue.title}</span>
             </div>
             {expanded && (
@@ -204,11 +203,10 @@ export function ReviewPanel({ reviews, onClose, onRevert, onFixJob }: Props) {
                             <button
                                 key={review.id}
                                 onClick={() => setSelectedIndex(i)}
-                                className={`px-3 py-1 text-xs rounded whitespace-nowrap ${
-                                    i === selectedIndex
-                                        ? 'bg-[#3e3e42] text-white'
-                                        : 'text-gray-500 hover:text-gray-300'
-                                }`}
+                                className={`px-3 py-1 text-xs rounded whitespace-nowrap ${i === selectedIndex
+                                    ? 'bg-[#3e3e42] text-white'
+                                    : 'text-gray-500 hover:text-gray-300'
+                                    }`}
                             >
                                 {new Date(review.timestamp).toLocaleTimeString()} - {review.result.decision}
                             </button>
@@ -271,7 +269,7 @@ export function ReviewPanel({ reviews, onClose, onRevert, onFixJob }: Props) {
                             <RotateCcw size={14} /> Revert (git restore .)
                         </button>
                         <button
-                            onClick={() => onFixJob?.(result.issues)}
+                            onClick={() => onFixJob?.(result)}
                             className="flex items-center gap-2 px-4 py-2 bg-blue-900/50 hover:bg-blue-900 text-blue-200 text-sm rounded"
                         >
                             <Wrench size={14} /> Create Fix Job
@@ -282,7 +280,7 @@ export function ReviewPanel({ reviews, onClose, onRevert, onFixJob }: Props) {
                 {result.decision === 'IMPROVE' && (
                     <div className="p-4 bg-[#252526] border-t border-[#3e3e42] flex gap-2 shrink-0">
                         <button
-                            onClick={() => onFixJob?.(result.issues)}
+                            onClick={() => onFixJob?.(result)}
                             className="flex items-center gap-2 px-4 py-2 bg-yellow-900/50 hover:bg-yellow-900 text-yellow-200 text-sm rounded"
                         >
                             <Play size={14} /> Continue to Middle Level

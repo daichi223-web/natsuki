@@ -8,6 +8,7 @@ import { setupOrchestrator } from './orchestrator'
 import { setupLLMHandlers } from './llm-service'
 import { setupResearchHandlers } from './research-service'
 import { keyManager } from './key-manager'
+import { jobManager } from './job-manager' // Initializes JobManager & IPC
 
 // Disable GPU acceleration to avoid cache permission issues
 app.disableHardwareAcceleration()

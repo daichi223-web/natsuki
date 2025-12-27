@@ -129,6 +129,7 @@ export async function createSnapshot(cwd: string, jobId: string, intent: string 
             workspace: cwd,
             created_at: timestamp.toISOString(),
             intent: intent, // Added Intent
+            completeness: 'full', // Default to full for v0.1
             sources,
             summary: {
                 dirty: gitStatus.trim().length > 0,

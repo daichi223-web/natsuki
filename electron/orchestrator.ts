@@ -4,31 +4,31 @@ import { runReview } from './llm-service';
 import { sendToPty, setIdleCallback } from './pty-manager';
 import { ReviewResult } from './llm-service';
 import { keyManager } from './key-manager';
+import { jobManager, Job, JobStatus } from './job-manager';
 
-// Job State Definition (matches types.ts)
-type JobStatus = 'idle' | 'running' | 'verifying' | 'snapshotting' | 'reviewing' | 'completed' | 'failed' | 'waiting_approval' | 'fixing';
-
-interface JobState {
-    id: string;
-    description: string;
-    status: JobStatus;
-    workspace: string;
-    history: {
-        timestamp: number;
-        action: string;
-        result?: any;
-    }[];
-    latestSnapshotId?: string;
-    reviewResult?: ReviewResult;
-    autoFixCount: number;
-    apiKey?: string;
+// Runtime tracking for active jobs (things not in DB like PTY handles, timeouts)
+interface JobRuntime {
+    jobId: string;
+    // Add runtime specific stuff here if needed
 }
 
-// In-memory store
-const activeJobs: Map<string, JobState> = new Map();
+const activeRuntimes: Map<string, JobRuntime> = new Map();
 
 // Configuration
 const MAX_AUTO_FIXES = 2;
+const MAX_DIFF_LINES = 1000;
+const TIMEOUTS = {
+    VERIFY: 10 * 60 * 1000,
+    SNAPSHOT: 5 * 60 * 1000,
+    REVIEW: 3 * 60 * 1000
+};
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    return Promise.race([
+        promise,
+        new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms))
+    ]);
+}
 
 export class Orchestrator {
     private mainWindow: BrowserWindow;
@@ -43,7 +43,6 @@ export class Orchestrator {
             return this.startJob(jobId, cwd);
         });
 
-        // Used for manual stepping or debug
         ipcMain.handle('orchestrator-step', async (_, { jobId }: { jobId: string }) => {
             return this.advanceLoop(jobId);
         });
@@ -53,38 +52,34 @@ export class Orchestrator {
         });
     }
 
-    private updateJobStatus(jobId: string, status: JobStatus, updates: Partial<JobState> = {}) {
-        const job = activeJobs.get(jobId);
+    private updateJobStatus(jobId: string, status: JobStatus, updates: Partial<Job> = {}) {
+        // Update via JobManager
+        const job = jobManager.updateJob(jobId, { status, ...updates });
         if (job) {
-            job.status = status;
-            Object.assign(job, updates);
-            this.mainWindow.webContents.send('job-update', { jobId, ...job });
+            this.mainWindow.webContents.send('job-update', job);
             console.log(`[Orchestrator] Job ${jobId} -> ${status}`);
         }
     }
 
     async startJob(jobId: string, cwd: string) {
-        // Check if we have ANY valid key to run autonomously
-        // For Phase 3.0, we prioritize 'anthropic' but support others.
-        // TODO: Get preferred provider from config/UI.
+        // Assume Job is already created in JobManager
+        const job = jobManager.getJob(jobId);
+        if (!job) {
+            console.error(`[Orchestrator] Job ${jobId} not found in JobManager`);
+            return { success: false, error: 'Job not found' };
+        }
+
         const provider = 'anthropic';
         const hasKey = !!keyManager.getApiKey(provider) || !!keyManager.getApiKey('gemini') || !!keyManager.getApiKey('openai');
 
-        const job: JobState = {
-            id: jobId,
-            description: "Active Job",
-            status: 'running',
-            workspace: cwd,
-            history: [],
-            autoFixCount: 0,
-            apiKey: hasKey ? 'present' : undefined // Keeping field name for frontend compatibility if needed, but value is dummy
-        };
-        activeJobs.set(jobId, job);
+        // Initialize runtime state if needed
+        activeRuntimes.set(jobId, { jobId });
 
-        this.updateJobStatus(jobId, 'running');
+        // Update Job Data (reset count)
+        this.updateJobStatus(jobId, 'running', { autoFixCount: 0 });
 
         if (hasKey) {
-            console.log(`[Orchestrator] Autonomous mode enabled for Job ${jobId} (Key found)`);
+            console.log(`[Orchestrator] Autonomous mode enabled for Job ${jobId}`);
         } else {
             console.log(`[Orchestrator] Manual mode (No Reviewer Key found)`);
         }
@@ -102,7 +97,7 @@ export class Orchestrator {
 
     // This method drives the Autonomous Loop
     async advanceLoop(jobId: string) {
-        const job = activeJobs.get(jobId);
+        const job = jobManager.getJob(jobId);
         if (!job) return;
 
         // Clear idle callback while we're processing
@@ -115,44 +110,62 @@ export class Orchestrator {
 
             if (job.status === 'running' || job.status === 'fixing') {
                 // Assume execution finished (manual trigger or detected idle).
+
+                // Cooldown: Wait for file system stability (simple sleep for v0.1)
+                await new Promise(r => setTimeout(r, 2000));
+
                 // Next: Verify
                 this.updateJobStatus(jobId, 'verifying');
-                const verifyRes = await runVerify(job.workspace, 'lint'); // Default profile
-                job.history.push({ timestamp: Date.now(), action: 'verify', result: verifyRes });
+                const verifyRes = await withTimeout(
+                    runVerify(job.workspace || process.cwd(), 'lint'),
+                    TIMEOUTS.VERIFY,
+                    'Verification'
+                );
+
+                if (job.history) {
+                    job.history.push({ timestamp: Date.now(), action: 'verify', result: verifyRes });
+                }
+                this.updateJobStatus(jobId, 'verifying'); // Trigger save
 
                 // Next: Snapshot
                 this.updateJobStatus(jobId, 'snapshotting');
-                const snapRes = await createSnapshot(job.workspace, jobId, job.description); // Pass Intent
+                const snapRes = await withTimeout(
+                    createSnapshot(job.workspace || process.cwd(), jobId, job.description),
+                    TIMEOUTS.SNAPSHOT,
+                    'Snapshot'
+                );
 
                 if (!snapRes.success || !snapRes.snapshotId) {
-                    this.updateJobStatus(jobId, 'failed', { description: 'Snapshot failed' });
+                    this.updateJobStatus(jobId, 'failed', { description: 'Snapshot failed: ' + snapRes.error });
                     return;
                 }
 
-                job.latestSnapshotId = snapRes.snapshotId;
+                // Update latestSnapshotId
+                this.updateJobStatus(jobId, 'snapshotting', { latestSnapshotId: snapRes.snapshotId });
 
                 // Next: Review (Key Check)
-                // We check dynamically in case key was added mid-flight
-                const provider = 'anthropic'; // TODO: Config
-                // We let llm-service handle the key retrieval.
-                // But we need to know if we SHOULD call it.
-                const canReview = !!keyManager.getApiKey(provider) || !!keyManager.getApiKey('gemini') || !!keyManager.getApiKey('openai');
+                const provider = 'anthropic';
+                const hasKey = !!keyManager.getApiKey(provider) || !!keyManager.getApiKey('gemini') || !!keyManager.getApiKey('openai');
 
-                if (canReview) {
+                if (hasKey) {
                     this.updateJobStatus(jobId, 'reviewing', { latestSnapshotId: snapRes.snapshotId });
 
-                    const reviewRes = await runReview(jobId, snapRes.snapshotId, ''); // No API key passed
+                    const reviewRes = await withTimeout(
+                        runReview(jobId, snapRes.snapshotId, ''),
+                        TIMEOUTS.REVIEW,
+                        'Review'
+                    );
+
                     if (reviewRes.success && reviewRes.result) {
-                        job.history.push({ timestamp: Date.now(), action: 'review', result: reviewRes.result });
-                        // Handle Decision (Fix/Approve/Block)
+                        if (job.history) job.history.push({ timestamp: Date.now(), action: 'review', result: reviewRes.result });
+                        // Save history and result
+                        this.updateJobStatus(jobId, 'reviewing', { reviewResult: reviewRes.result });
                         await this.handleReviewDecision(jobId, reviewRes.result);
                     } else {
-                        // If review failed (e.g. API error), fallback to manual? or fail?
-                        // For now, fail to alert user.
-                        this.updateJobStatus(jobId, 'failed', { description: 'Review API failed: ' + reviewRes.error });
+                        // If review failed (API error or safety block), we mark as failed
+                        this.updateJobStatus(jobId, 'failed', { description: 'Review failed: ' + reviewRes.error });
                     }
                 } else {
-                    // Manual Fallback
                     this.updateJobStatus(jobId, 'waiting_approval', { latestSnapshotId: snapRes.snapshotId });
                 }
             }
@@ -164,17 +177,17 @@ export class Orchestrator {
 
     // To be called when Review is done (could be via UI or auto)
     async handleReviewDecision(jobId: string, result: ReviewResult) {
-        const job = activeJobs.get(jobId);
+        const job = jobManager.getJob(jobId);
         if (!job) return;
 
-        job.reviewResult = result;
+        // job.reviewResult = result; // already saved above
 
         if (result.decision === 'APPROVE' || result.decision === 'EXCELLENT') {
             this.updateJobStatus(jobId, 'completed');
         } else if (result.decision === 'IMPROVE') {
-            if (job.autoFixCount < MAX_AUTO_FIXES) {
-                job.autoFixCount++;
-                this.updateJobStatus(jobId, 'fixing');
+            if ((job.autoFixCount || 0) < MAX_AUTO_FIXES) {
+                const newCount = (job.autoFixCount || 0) + 1;
+                this.updateJobStatus(jobId, 'fixing', { autoFixCount: newCount });
 
                 // Drive Claude to fix it!
                 const issuesText = result.issues.map(i => `- [${i.severity}] ${i.title}: ${i.evidence || ''}`).join('\n');
@@ -196,7 +209,7 @@ export class Orchestrator {
     }
 
     async handleUserAction(jobId: string, action: 'approve' | 'fix' | 'retry') {
-        const job = activeJobs.get(jobId);
+        const job = jobManager.getJob(jobId);
         if (!job) return;
         // Allows user to override state manually (e.g. force fix)
     }
